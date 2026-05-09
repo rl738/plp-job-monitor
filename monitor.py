@@ -7,36 +7,105 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
-URL = "https://publiclawproject.org.uk/support-us/latest-opportunities/"
-SEEN_JOBS_FILE = "seen_jobs.json"
 RECIPIENT_EMAIL = "rowanlightfoot2005@gmail.com"
+SEEN_JOBS_FILE = "seen_jobs.json"
 
 
-def fetch_jobs():
-    """Scrape the PLP opportunities page and return a dict of {title: url}."""
+# ─────────────────────────────────────────────
+# Site-specific scrapers
+# ─────────────────────────────────────────────
+
+def fetch_plp_jobs():
+    """Public Law Project – jobs are linked list items."""
+    url = "https://publiclawproject.org.uk/support-us/latest-opportunities/"
     headers = {"User-Agent": "Mozilla/5.0 (compatible; job-monitor-bot/1.0)"}
-    response = requests.get(URL, headers=headers, timeout=15)
+    response = requests.get(url, headers=headers, timeout=15)
     response.raise_for_status()
-
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # Find the main content area and grab all links inside list items
-    # The jobs appear as <li><a href="...">Job Title</a></li>
     content = soup.find("div", class_="entry-content") or soup.find("article") or soup.body
     jobs = {}
     for li in content.find_all("li"):
         link = li.find("a", href=True)
         if link and "publiclawproject.org.uk/latest/job" in link["href"]:
             title = link.get_text(strip=True)
-            url = link["href"]
             if title:
-                jobs[title] = url
+                jobs[title] = link["href"]
+    return url, jobs
 
-    return jobs
 
+def fetch_pilc_jobs():
+    """Public Interest Law Centre – jobs are bold headings in prose."""
+    url = "https://www.pilc.org.uk/about/jobs/"
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; job-monitor-bot/1.0)"}
+    response = requests.get(url, headers=headers, timeout=15)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    jobs = {}
+    content = soup.find("div", class_="entry-content") or soup.find("article") or soup.body
+    skip_prefixes = (
+        "Purpose", "Salary", "Hours", "Contract", "Location",
+        "Start", "Closing", "How", "Accountable", "Direct", "Please"
+    )
+    for strong in content.find_all(["strong", "b"]):
+        text = strong.get_text(strip=True)
+        if len(text) > 15 and not any(text.startswith(p) for p in skip_prefixes):
+            jobs[text] = url
+    return url, jobs
+
+
+def fetch_leighday_jobs():
+    """Leigh Day – jobs are JavaScript-rendered, requires headless browser."""
+    from playwright.sync_api import sync_playwright
+
+    url = "https://careers.leighday.co.uk/jobs/vacancy/find/results/"
+    jobs = {}
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(url, wait_until="networkidle", timeout=30000)
+
+        try:
+            page.wait_for_selector(
+                "a.vacancy-title, .vacancy-list a, h3.job-title a, "
+                ".job-listing a, li.vacancy a, a[href*='/vacancy/']",
+                timeout=10000
+            )
+        except Exception:
+            pass  # No jobs currently listed is fine
+
+        soup = BeautifulSoup(page.content(), "html.parser")
+        browser.close()
+
+    # eArcu ATS typically links to individual vacancy pages
+    for el in soup.find_all("a", href=True):
+        title = el.get_text(strip=True)
+        href = el["href"]
+        if "/vacancy/" in href and len(title) > 5:
+            full_url = href if href.startswith("http") else f"https://careers.leighday.co.uk{href}"
+            jobs[title] = full_url
+
+    return url, jobs
+
+
+# ─────────────────────────────────────────────
+# All sites to monitor — add more here
+# ─────────────────────────────────────────────
+
+SITES = {
+    "Public Law Project": fetch_plp_jobs,
+    "Public Interest Law Centre": fetch_pilc_jobs,
+    "Leigh Day": fetch_leighday_jobs,
+}
+
+
+# ─────────────────────────────────────────────
+# State management
+# ─────────────────────────────────────────────
 
 def load_seen_jobs():
-    """Load previously seen jobs from the JSON file."""
     if os.path.exists(SEEN_JOBS_FILE):
         with open(SEEN_JOBS_FILE, "r") as f:
             return json.load(f)
@@ -44,42 +113,42 @@ def load_seen_jobs():
 
 
 def save_seen_jobs(jobs):
-    """Save current jobs to the JSON file."""
     with open(SEEN_JOBS_FILE, "w") as f:
         json.dump(jobs, f, indent=2)
 
 
-def send_email(new_jobs):
-    """Send an email alert listing the new job postings."""
+# ─────────────────────────────────────────────
+# Email
+# ─────────────────────────────────────────────
+
+def send_email(new_jobs_by_site):
     sender_email = os.environ["GMAIL_ADDRESS"]
     app_password = os.environ["GMAIL_APP_PASSWORD"]
 
-    subject = f"🔔 New job(s) at Public Law Project ({len(new_jobs)} new)"
+    total = sum(len(jobs) for jobs in new_jobs_by_site.values())
+    subject = f"🔔 {total} new job(s) found across monitored sites"
 
-    # Build plain-text and HTML versions
-    text_lines = [
-        f"New job posting(s) have appeared on the Public Law Project opportunities page:\n",
-    ]
-    html_lines = [
-        "<h2>New job posting(s) at Public Law Project</h2>",
-        "<ul>",
-    ]
+    text_lines = ["New job posting(s) found:\n"]
+    html_lines = ["<h2>New job posting(s) found</h2>"]
 
-    for title, url in new_jobs.items():
-        text_lines.append(f"  • {title}\n    {url}\n")
-        html_lines.append(f'  <li><a href="{url}">{title}</a></li>')
+    for site_name, jobs in new_jobs_by_site.items():
+        if not jobs:
+            continue
+        text_lines.append(f"\n{site_name}:")
+        html_lines.append(f"<h3>{site_name}</h3><ul>")
+        for title, url in jobs.items():
+            text_lines.append(f"  • {title}\n    {url}")
+            html_lines.append(f'  <li><a href="{url}">{title}</a></li>')
+        html_lines.append("</ul>")
 
-    html_lines.append("</ul>")
-    html_lines.append(f'<p><a href="{URL}">View all opportunities →</a></p>')
-    html_lines.append(f"<p><small>Alert sent {datetime.now().strftime('%d %b %Y at %H:%M')} UTC</small></p>")
-
-    text_lines.append(f"\nView all opportunities: {URL}")
+    html_lines.append(
+        f"<p><small>Alert sent {datetime.now().strftime('%d %b %Y at %H:%M')} UTC</small></p>"
+    )
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = sender_email
     msg["To"] = RECIPIENT_EMAIL
-
     msg.attach(MIMEText("\n".join(text_lines), "plain"))
     msg.attach(MIMEText("\n".join(html_lines), "html"))
 
@@ -87,25 +156,42 @@ def send_email(new_jobs):
         server.login(sender_email, app_password)
         server.sendmail(sender_email, RECIPIENT_EMAIL, msg.as_string())
 
-    print(f"Email sent to {RECIPIENT_EMAIL} with {len(new_jobs)} new job(s).")
+    print(f"Email sent with {total} new job(s).")
 
+
+# ─────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────
 
 def main():
-    print(f"Checking {URL} ...")
-    current_jobs = fetch_jobs()
-    print(f"Found {len(current_jobs)} job(s) currently listed: {list(current_jobs.keys())}")
-
     seen_jobs = load_seen_jobs()
-    new_jobs = {title: url for title, url in current_jobs.items() if title not in seen_jobs}
+    all_current_jobs = {}
+    new_jobs_by_site = {}
 
-    if new_jobs:
-        print(f"🆕 {len(new_jobs)} new job(s) found: {list(new_jobs.keys())}")
-        send_email(new_jobs)
-    else:
-        print("No new jobs since last check.")
+    for site_name, fetch_fn in SITES.items():
+        print(f"Checking {site_name}...")
+        try:
+            url, current_jobs = fetch_fn()
+            print(f"  Found {len(current_jobs)} job(s): {list(current_jobs.keys())}")
 
-    # Update the saved list to include everything currently on the page
-    save_seen_jobs(current_jobs)
+            site_seen = seen_jobs.get(site_name, {})
+            new_jobs = {t: u for t, u in current_jobs.items() if t not in site_seen}
+
+            if new_jobs:
+                print(f"  🆕 {len(new_jobs)} new: {list(new_jobs.keys())}")
+                new_jobs_by_site[site_name] = new_jobs
+            else:
+                print(f"  No new jobs.")
+
+            all_current_jobs[site_name] = current_jobs
+
+        except Exception as e:
+            print(f"  ⚠️ Error fetching {site_name}: {e}")
+
+    if new_jobs_by_site:
+        send_email(new_jobs_by_site)
+
+    save_seen_jobs(all_current_jobs)
     print("Done.")
 
 
