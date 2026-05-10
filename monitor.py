@@ -10,7 +10,6 @@ from datetime import datetime
 RECIPIENT_EMAIL = "rowanlightfoot2005@gmail.com"
 SEEN_JOBS_FILE = "seen_jobs.json"
 
-
 # ─────────────────────────────────────────────
 # Site-specific scrapers
 # ─────────────────────────────────────────────
@@ -44,49 +43,39 @@ def fetch_pilc_jobs():
 
     jobs = {}
     content = soup.find("div", class_="entry-content") or soup.find("article") or soup.body
-    skip_prefixes = (
-        "Purpose", "Salary", "Hours", "Contract", "Location",
-        "Start", "Closing", "How", "Accountable", "Direct", "Please"
-    )
     for strong in content.find_all(["strong", "b"]):
         text = strong.get_text(strip=True)
-        if len(text) > 15 and not any(text.startswith(p) for p in skip_prefixes):
+        if len(text) > 15 and not text.startswith("Purpose") and not text.startswith("Salary") \
+                and not text.startswith("Hours") and not text.startswith("Contract") \
+                and not text.startswith("Location") and not text.startswith("Start") \
+                and not text.startswith("Closing") and not text.startswith("How") \
+                and not text.startswith("Accountable") and not text.startswith("Direct"):
             jobs[text] = url
     return url, jobs
 
 
-def fetch_leighday_jobs():
-    """Leigh Day – jobs are JavaScript-rendered, requires headless browser."""
-    from playwright.sync_api import sync_playwright
+def fetch_advocate_jobs():
+    """Advocate – jobs are h2 headings with links under 'Current Vacancies'."""
+    url = "https://weareadvocate.org.uk/about-us/work-for-us.html"
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; job-monitor-bot/1.0)"}
+    response = requests.get(url, headers=headers, timeout=15)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
 
-    url = "https://careers.leighday.co.uk/jobs/vacancy/find/results/"
     jobs = {}
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(url, wait_until="networkidle", timeout=30000)
-
-        try:
-            page.wait_for_selector(
-                "a.vacancy-title, .vacancy-list a, h3.job-title a, "
-                ".job-listing a, li.vacancy a, a[href*='/vacancy/']",
-                timeout=10000
-            )
-        except Exception:
-            pass  # No jobs currently listed is fine
-
-        soup = BeautifulSoup(page.content(), "html.parser")
-        browser.close()
-
-    # eArcu ATS typically links to individual vacancy pages
-    for el in soup.find_all("a", href=True):
-        title = el.get_text(strip=True)
-        href = el["href"]
-        if "/vacancy/" in href and len(title) > 5:
-            full_url = href if href.startswith("http") else f"https://careers.leighday.co.uk{href}"
-            jobs[title] = full_url
-
+    vacancies_heading = soup.find(lambda tag: tag.name in ["h1", "h2", "h3"]
+                                  and "Current Vacancies" in tag.get_text())
+    if vacancies_heading:
+        for sibling in vacancies_heading.find_next_siblings():
+            link = sibling.find("a", href=True) if sibling.name else None
+            if sibling.name in ["h2", "h3"] and link:
+                title = sibling.get_text(strip=True)
+                job_url = link["href"]
+                if not job_url.startswith("http"):
+                    job_url = "https://weareadvocate.org.uk" + job_url
+                jobs[title] = job_url
+            elif sibling.name == "h1":
+                break
     return url, jobs
 
 
@@ -97,7 +86,7 @@ def fetch_leighday_jobs():
 SITES = {
     "Public Law Project": fetch_plp_jobs,
     "Public Interest Law Centre": fetch_pilc_jobs,
-    "Leigh Day": fetch_leighday_jobs,
+    "Advocate": fetch_advocate_jobs,
 }
 
 
@@ -141,9 +130,7 @@ def send_email(new_jobs_by_site):
             html_lines.append(f'  <li><a href="{url}">{title}</a></li>')
         html_lines.append("</ul>")
 
-    html_lines.append(
-        f"<p><small>Alert sent {datetime.now().strftime('%d %b %Y at %H:%M')} UTC</small></p>"
-    )
+    html_lines.append(f"<p><small>Alert sent {datetime.now().strftime('%d %b %Y at %H:%M')} UTC</small></p>")
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
