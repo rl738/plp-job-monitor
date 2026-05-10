@@ -34,7 +34,7 @@ def fetch_plp_jobs():
 
 
 def fetch_pilc_jobs():
-    """Public Interest Law Centre – jobs are bold headings in prose."""
+    """Public Interest Law Centre – job title is in an h2 or h3, or linked."""
     url = "https://www.pilc.org.uk/about/jobs/"
     headers = {"User-Agent": "Mozilla/5.0 (compatible; job-monitor-bot/1.0)"}
     response = requests.get(url, headers=headers, timeout=15)
@@ -43,19 +43,36 @@ def fetch_pilc_jobs():
 
     jobs = {}
     content = soup.find("div", class_="entry-content") or soup.find("article") or soup.body
-    for strong in content.find_all(["strong", "b"]):
-        text = strong.get_text(strip=True)
-        if len(text) > 15 and not text.startswith("Purpose") and not text.startswith("Salary") \
-                and not text.startswith("Hours") and not text.startswith("Contract") \
-                and not text.startswith("Location") and not text.startswith("Start") \
-                and not text.startswith("Closing") and not text.startswith("How") \
-                and not text.startswith("Accountable") and not text.startswith("Direct"):
-            jobs[text] = url
+
+    # Try headings with links first
+    for tag in content.find_all(["h2", "h3"]):
+        link = tag.find("a", href=True)
+        title = tag.get_text(strip=True)
+        skip_phrases = ["current vacanc", "about us", "contact", "pilc", "equal opportunit"]
+        if any(p in title.lower() for p in skip_phrases):
+            continue
+        if len(title) > 5:
+            job_url = link["href"] if link else url
+            if job_url and not job_url.startswith("http"):
+                job_url = "https://www.pilc.org.uk" + job_url
+            jobs[title] = job_url
+
+    # Fallback: look for links to job pages
+    if not jobs:
+        for a in content.find_all("a", href=True):
+            if "job" in a["href"].lower() or "vacanc" in a["href"].lower():
+                title = a.get_text(strip=True)
+                if len(title) > 5:
+                    job_url = a["href"]
+                    if not job_url.startswith("http"):
+                        job_url = "https://www.pilc.org.uk" + job_url
+                    jobs[title] = job_url
+
     return url, jobs
 
 
 def fetch_advocate_jobs():
-    """Advocate – jobs are h2 headings with links under 'Current Vacancies'."""
+    """Advocate – jobs are linked from /work-for-us/ paths on the careers page."""
     url = "https://weareadvocate.org.uk/about-us/work-for-us.html"
     headers = {"User-Agent": "Mozilla/5.0 (compatible; job-monitor-bot/1.0)"}
     response = requests.get(url, headers=headers, timeout=15)
@@ -63,19 +80,14 @@ def fetch_advocate_jobs():
     soup = BeautifulSoup(response.text, "html.parser")
 
     jobs = {}
-    vacancies_heading = soup.find(lambda tag: tag.name in ["h1", "h2", "h3"]
-                                  and "Current Vacancies" in tag.get_text())
-    if vacancies_heading:
-        for sibling in vacancies_heading.find_next_siblings():
-            link = sibling.find("a", href=True) if sibling.name else None
-            if sibling.name in ["h2", "h3"] and link:
-                title = sibling.get_text(strip=True)
-                job_url = link["href"]
-                if not job_url.startswith("http"):
-                    job_url = "https://weareadvocate.org.uk" + job_url
-                jobs[title] = job_url
-            elif sibling.name == "h1":
-                break
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        title = a.get_text(strip=True)
+        # Job links follow the pattern /work-for-us/<job-slug>.html
+        if "/work-for-us/" in href and href.endswith(".html") and len(title) > 5:
+            if not href.startswith("http"):
+                href = "https://weareadvocate.org.uk" + href
+            jobs[title] = href
     return url, jobs
 
 
